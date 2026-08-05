@@ -164,7 +164,7 @@
 const TOKENS = [
   { address: "0x249130F5E2dD4CF278180c0dF8273f3592Ad1247", network: "eth" },        // DMT-NAT
   { address: "0x94534EeEe131840b1c0F61847c572228bdfDDE93", network: "pulsechain" }, // PTGC
-  { address: "0xF19308F923582A6f7c465e5CE7a9Dc1BEC6665B1", network: "pulsechain" }, // TITANX
+  { address: "0xF19308F923582A6f7c465e5CE7a9Dc1BEC6665B1", network: "eth" },        // TITANX
   { address: "0xF6f8Db0aBa00007681F8fAF16A0FDa1c9B030b11", network: "pulsechain" }, // PRVX
 ];
 
@@ -213,8 +213,13 @@ async function persist(address){
 
 async function fetchPoolsOnNetwork(network, address){
   const url = `https://api.geckoterminal.com/api/v2/networks/${network}/tokens/${address}/pools?page=1&include=base_token,quote_token`;
-  const resp = await fetch(url);
-  if(!resp.ok) return null;
+  const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+  if(resp.status === 429){
+    throw new Error("rate limited (429) — wait a moment and refresh again");
+  }
+  if(!resp.ok){
+    throw new Error(`HTTP ${resp.status}`);
+  }
   const json = await resp.json();
   if(!json.data || json.data.length === 0) return null;
 
@@ -258,32 +263,31 @@ async function fetchPoolsOnNetwork(network, address){
 }
 
 async function fetchPrice(token){
-  const address = token.address;
-  const networksToTry = [token.network, ...FALLBACK_NETWORKS.filter(n => n !== token.network)];
-  for(const network of networksToTry){
-    try{
-      const result = await fetchPoolsOnNetwork(network, address);
-      if(result) return result;
-    }catch(e){
-      // try next network
-    }
+  try{
+    const result = await fetchPoolsOnNetwork(token.network, token.address);
+    return result;
+  }catch(e){
+    console.error("price fetch failed for", token.address, e);
+    return { error: true, errorMsg: e.message || "fetch failed" };
   }
-  console.error("price fetch failed for", address, "across all networks tried");
-  return null;
 }
 
 async function refreshAll(){
   const btn = document.getElementById('refreshBtn');
   btn.disabled = true; btn.textContent = "⟳ SYNCING...";
-  await Promise.all(TOKENS.map(async t => {
+
+  for(const t of TOKENS){
     const d = await fetchPrice(t);
-    if(d){
-      state[t.address] = { ...state[t.address], ...d, error:false };
+    if(d && d.error){
+      state[t.address] = { ...state[t.address], error:true, errorMsg: d.errorMsg };
+    } else if(d){
+      state[t.address] = { ...state[t.address], ...d, error:false, errorMsg:null };
     } else {
-      state[t.address] = { ...state[t.address], error:true };
+      state[t.address] = { ...state[t.address], error:true, errorMsg:"no pool found on " + t.network };
     }
-  }));
-  render();
+    render();
+    await new Promise(r => setTimeout(r, 600)); // stagger to respect ~10-30 calls/min limit
+  }
   document.getElementById('lastUpdated').textContent = "updated " + new Date().toLocaleTimeString();
   btn.disabled = false; btn.textContent = "⟳ REFRESH PRICES";
 }
@@ -350,20 +354,7 @@ function render(){
     const card = document.createElement('div');
     card.className = 'card';
 
-    if(s.error && !s.price){
-      card.innerHTML = `
-        <div class="card-top">
-          <div>
-            <div class="sym">UNKNOWN</div>
-            <div class="addr">${t.address}</div>
-          </div>
-        </div>
-        <div class="err">⚠ Couldn't find a live pool for this address on PulseChain, Ethereum, BSC, or Base. Double-check the address or let me know which chain it's on.</div>
-      `;
-      grid.appendChild(card);
-      return;
-    }
-
+    const hasPrice = !!s.price;
     const value = (s.price && s.shares) ? s.price*s.shares : 0;
     const cost = (s.cost && s.shares) ? s.cost*s.shares : 0;
     const pl = value - cost;
@@ -376,15 +367,17 @@ function render(){
     card.innerHTML = `
       <div class="card-top">
         <div>
-          <div class="sym">${s.symbol || '—'}</div>
-          <div class="name">${s.name || 'Loading…'}</div>
+          <div class="sym">${s.symbol || 'UNKNOWN'}</div>
+          <div class="name">${s.name || (hasPrice ? '' : 'Price unavailable')}</div>
         </div>
-        <div class="chain-tag">${s.chain || '···'}</div>
+        <div class="chain-tag">${s.chain || t.network}</div>
       </div>
       <div class="addr">${t.address}</div>
 
+      ${s.error ? `<div class="err" style="margin-top:10px;">⚠ ${s.errorMsg || "Couldn't find a live pool for this address."}</div>` : ''}
+
       <div class="price-row">
-        <div class="price">${s.price ? fmtUsd(s.price) : '···'}</div>
+        <div class="price">${hasPrice ? fmtUsd(s.price) : '···'}</div>
         ${chg !== null && chg !== undefined ? `<div class="chg ${chg>=0?'pos':'neg'}">${chg>=0?'+':''}${fmtNum(chg,2)}% 24h</div>` : ''}
       </div>
 
@@ -401,12 +394,12 @@ function render(){
 
       <div class="divider"></div>
 
-      <div class="stat-row"><span class="stat-label">Market Value</span><span class="stat-val">${fmtUsd(value,2)}</span></div>
+      <div class="stat-row"><span class="stat-label">Market Value</span><span class="stat-val">${hasPrice ? fmtUsd(value,2) : '—'}</span></div>
       <div class="stat-row"><span class="stat-label">Cost Basis</span><span class="stat-val">${cost>0?fmtUsd(cost,2):'—'}</span></div>
       <div class="stat-row">
         <span class="stat-label">P&L</span>
         <span class="stat-val ${plPct===null?'neu':(pl>=0?'pos':'neg')}">
-          ${plPct===null ? '—' : `${pl>=0?'+':''}${fmtUsd(pl,2)} (${plPct>=0?'+':''}${fmtNum(plPct,2)}%)`}
+          ${(!hasPrice || plPct===null) ? '—' : `${pl>=0?'+':''}${fmtUsd(pl,2)} (${plPct>=0?'+':''}${fmtNum(plPct,2)}%)`}
         </span>
       </div>
 
