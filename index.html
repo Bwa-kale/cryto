@@ -186,13 +186,13 @@ function fmtNum(n, decimals=2){
   return n.toLocaleString(undefined,{minimumFractionDigits:decimals,maximumFractionDigits:decimals});
 }
 
-async function loadPersisted(){
+function loadPersisted(){
   for(const t of TOKENS){
-    const key = "holding:" + t.address.toLowerCase();
+    const key = "vault-crypto:" + t.address.toLowerCase();
     try{
-      const res = await window.storage.get(key, false);
-      if(res && res.value){
-        const parsed = JSON.parse(res.value);
+      const raw = localStorage.getItem(key);
+      if(raw){
+        const parsed = JSON.parse(raw);
         state[t.address] = { ...state[t.address], shares: parsed.shares ?? 0, cost: parsed.cost ?? 0 };
       } else {
         state[t.address] = { ...state[t.address], shares: 0, cost: 0 };
@@ -203,11 +203,11 @@ async function loadPersisted(){
   }
 }
 
-async function persist(address){
-  const key = "holding:" + address.toLowerCase();
+function persist(address){
+  const key = "vault-crypto:" + address.toLowerCase();
   const s = state[address];
   try{
-    await window.storage.set(key, JSON.stringify({ shares: s.shares, cost: s.cost }), false);
+    localStorage.setItem(key, JSON.stringify({ shares: s.shares, cost: s.cost }));
   }catch(e){ console.error("storage save failed", e); }
 }
 
