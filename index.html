@@ -296,11 +296,31 @@ function updateField(address, field, value){
   const num = parseFloat(value);
   state[address][field] = isNaN(num) ? 0 : num;
   persist(address);
-  render();
+  // don't call render() here — the input the user is actively typing in
+  // would get destroyed and rebuilt mid-keystroke. Totals/ratios/allocation
+  // catch up on the next price refresh or when the field loses focus.
+}
+
+function onFieldBlur(address, field, value){
+  updateField(address, field, value);
+  render(); // now safe to rebuild — the field is no longer focused
 }
 
 function render(){
   const grid = document.getElementById('cardGrid');
+
+  // capture focus state so an auto-refresh mid-typing doesn't steal the cursor
+  const activeEl = document.activeElement;
+  let focusRestore = null;
+  if(activeEl && activeEl.classList && activeEl.classList.contains('field-input')){
+    focusRestore = {
+      address: activeEl.dataset.address,
+      field: activeEl.dataset.field,
+      selStart: activeEl.selectionStart,
+      selEnd: activeEl.selectionEnd
+    };
+  }
+
   grid.innerHTML = "";
 
   // compute total value
@@ -424,10 +444,23 @@ function render(){
 
   // wire up inputs
   grid.querySelectorAll('.field-input').forEach(inp => {
-    inp.addEventListener('change', (e) => {
+    inp.addEventListener('input', (e) => {
       updateField(e.target.dataset.address, e.target.dataset.field, e.target.value);
     });
+    inp.addEventListener('blur', (e) => {
+      onFieldBlur(e.target.dataset.address, e.target.dataset.field, e.target.value);
+    });
   });
+
+  // restore focus/cursor if a refresh happened mid-typing
+  if(focusRestore){
+    const sel = `.field-input[data-address="${focusRestore.address}"][data-field="${focusRestore.field}"]`;
+    const newInput = grid.querySelector(sel);
+    if(newInput){
+      newInput.focus();
+      try{ newInput.setSelectionRange(focusRestore.selStart, focusRestore.selEnd); }catch(e){}
+    }
+  }
 }
 
 async function init(){
