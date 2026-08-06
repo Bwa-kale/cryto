@@ -156,6 +156,7 @@
   .ratio-sub{font-size:11px;color:var(--sub);margin-top:2px;}
 
   .err{color:var(--red);font-family:'JetBrains Mono',monospace;font-size:12px;padding:8px 0;}
+  .warn{color:var(--gold-soft);font-family:'JetBrains Mono',monospace;font-size:11px;padding:6px 0;opacity:.85;}
   .loading{color:var(--sub);font-family:'JetBrains Mono',monospace;font-size:12px;padding:8px 0;}
 
   footer{text-align:center;margin-top:30px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--sub);letter-spacing:1px;}
@@ -292,6 +293,24 @@ function daysHeld(purchaseDateStr){
   return Math.floor(diffMs / 86400000);
 }
 
+// Nets losses in one holding-period bucket against gains in the other, per
+// standard Schedule D ordering. Returns the taxable gain remaining in each
+// bucket (never negative) plus any leftover net capital loss.
+function netCapitalGains(netST, netLT){
+  let st = netST, lt = netLT, netLoss = 0;
+  if(st < 0 && lt > 0){
+    if(lt + st >= 0){ lt = lt + st; st = 0; }
+    else { netLoss = -(lt + st); st = 0; lt = 0; }
+  } else if(lt < 0 && st > 0){
+    if(st + lt >= 0){ st = st + lt; lt = 0; }
+    else { netLoss = -(st + lt); st = 0; lt = 0; }
+  } else if(st < 0 && lt < 0){
+    netLoss = -(st + lt);
+    st = 0; lt = 0;
+  }
+  return { stGain: Math.max(0, st), ltGain: Math.max(0, lt), netLoss };
+}
+
 
 const COLORS = ["#d4af37", "#8b6cff", "#39ff88", "#ff8a5c"];
 
@@ -402,8 +421,16 @@ async function fetchPrice(token){
     const result = await fetchPoolsOnNetwork(token.network, token.address);
     return result;
   }catch(e){
-    console.error("price fetch failed for", token.address, e);
-    return { error: true, errorMsg: e.message || "fetch failed" };
+    // transient network hiccups (CORS-masked rate limits, brief outages) are common
+    // and usually resolve fast — retry once before giving up
+    await new Promise(r => setTimeout(r, 900));
+    try{
+      const retryResult = await fetchPoolsOnNetwork(token.network, token.address);
+      return retryResult;
+    }catch(e2){
+      console.error("price fetch failed for", token.address, "(after retry)", e2);
+      return { error: true, errorMsg: e2.message || "fetch failed" };
+    }
   }
 }
 
@@ -493,37 +520,39 @@ function render(){
     plEl.innerHTML = `<span class="neu">add cost basis to track P&L</span>`;
   }
 
-  // ── aggregate ST/LT gains across all assets for the combined tax card ──
-  let totalSTGain = 0, totalLTGain = 0, anyGainData = false;
+  // ── aggregate ST/LT gains AND losses across all assets, then net them ──
+  let netST = 0, netLT = 0, anyGainData = false;
   TOKENS.forEach(t => {
     const s = state[t.address];
     if(!s || !s.price || !s.shares || !s.cost) return;
-    const gain = (s.price - s.cost) * s.shares;
-    if(gain <= 0) return; // only taxable gains matter for this estimate
+    const pl = (s.price - s.cost) * s.shares;
     const held = daysHeld(s.purchaseDate);
     if(held === null) return; // no purchase date entered — can't classify
     anyGainData = true;
-    if(held > 365) totalLTGain += gain; else totalSTGain += gain;
+    if(held > 365) netLT += pl; else netST += pl;
   });
 
   const taxBody = document.getElementById('taxBody');
   if(!anyGainData){
     taxBody.innerHTML = `<div class="loading">Add a purchase date and cost basis to each holding to estimate what you'd owe on a sale.</div>`;
   } else {
-    const impact = computeTaxImpact(taxSettings.wages, totalSTGain, totalLTGain);
-    const totalGain = totalSTGain + totalLTGain;
+    const netted = netCapitalGains(netST, netLT);
+    const lossDeduction = Math.min(3000, netted.netLoss);
+    const effectiveWages = Math.max(0, taxSettings.wages - lossDeduction);
+    const impact = computeTaxImpact(effectiveWages, netted.stGain, netted.ltGain);
+    const totalGain = netted.stGain + netted.ltGain;
     const netAfterTax = totalGain - impact.totalTax;
     const effRate = totalGain > 0 ? (impact.totalTax/totalGain)*100 : 0;
 
     taxBody.innerHTML = `
       <div class="tax-grid">
         <div class="tax-stat">
-          <div class="tax-stat-label">Short-Term Gain</div>
-          <div class="tax-stat-val">${fmtUsd(totalSTGain,2)}</div>
+          <div class="tax-stat-label">Net Short-Term</div>
+          <div class="tax-stat-val ${netST<0?'neg':''}">${netST<0?'-':''}${fmtUsd(Math.abs(netST),2)}</div>
         </div>
         <div class="tax-stat">
-          <div class="tax-stat-label">Long-Term Gain</div>
-          <div class="tax-stat-val">${fmtUsd(totalLTGain,2)}</div>
+          <div class="tax-stat-label">Net Long-Term</div>
+          <div class="tax-stat-val ${netLT<0?'neg':''}">${netLT<0?'-':''}${fmtUsd(Math.abs(netLT),2)}</div>
         </div>
         <div class="tax-stat">
           <div class="tax-stat-label">Federal (ordinary + LTCG)</div>
@@ -534,6 +563,7 @@ function render(){
           <div class="tax-stat-val">${fmtUsd(impact.nyTax + impact.nycTax,2)}</div>
         </div>
       </div>
+      ${netted.netLoss > 0 ? `<div class="tax-stat" style="margin-bottom:16px;"><div class="tax-stat-label">Capital Loss${netted.netLoss > 3000 ? ' (capped at $3,000/yr vs. ordinary income, rest carries forward)' : ' Applied Against Ordinary Income'}</div><div class="tax-stat-val pos">-${fmtUsd(lossDeduction,2)}</div></div>` : ''}
       ${impact.niit > 0 ? `<div class="tax-stat" style="margin-bottom:16px;"><div class="tax-stat-label">NIIT Surtax (3.8%, MAGI over $200K)</div><div class="tax-stat-val">${fmtUsd(impact.niit,2)}</div></div>` : ''}
       <div class="tax-total-row">
         <div>
@@ -545,7 +575,7 @@ function render(){
           <div class="tax-net-val">${fmtUsd(netAfterTax,2)}</div>
         </div>
       </div>
-      <div class="tax-note">Stacks on top of your $${taxSettings.wages.toLocaleString()} W-2 income · single filer, NYC resident, 2026 brackets · long-term = held over 365 days · NY/NYC tax gains as ordinary income (no preferential rate) · estimate only, not tax advice — confirm with a CPA before filing.</div>
+      <div class="tax-note">Stacks on top of your $${taxSettings.wages.toLocaleString()} W-2 income · single filer, NYC resident, 2026 brackets · long-term = held over 365 days · losses in one bucket net against gains in the other before tax · NY/NYC tax gains as ordinary income (no preferential rate) · estimate only, not tax advice — confirm with a CPA before filing.</div>
     `;
   }
 
@@ -596,13 +626,20 @@ function render(){
     if(held !== null){
       const isLT = held > 365;
       badgeHtml = `<span class="holding-badge ${isLT?'lt':'st'}">${isLT?'Long-Term':'Short-Term'} · ${held}d held</span>`;
-      if(hasPrice && s.shares && s.cost && pl > 0){
-        const single = computeTaxImpact(taxSettings.wages, isLT?0:pl, isLT?pl:0);
-        const net = pl - single.totalTax;
-        cardTaxHtml = `
-          <div class="stat-row"><span class="stat-label">Est. Tax If Sold Today</span><span class="stat-val neg">${fmtUsd(single.totalTax,2)}</span></div>
-          <div class="stat-row"><span class="stat-label">Net After Tax</span><span class="stat-val pos">${fmtUsd(net,2)}</span></div>
-        `;
+      if(hasPrice && s.shares && s.cost){
+        if(pl > 0){
+          const single = computeTaxImpact(taxSettings.wages, isLT?0:pl, isLT?pl:0);
+          const net = pl - single.totalTax;
+          cardTaxHtml = `
+            <div class="stat-row"><span class="stat-label">Est. Tax If Sold Today</span><span class="stat-val neg">${fmtUsd(single.totalTax,2)}</span></div>
+            <div class="stat-row"><span class="stat-label">Net After Tax</span><span class="stat-val pos">${fmtUsd(net,2)}</span></div>
+          `;
+        } else if(pl < 0){
+          cardTaxHtml = `
+            <div class="stat-row"><span class="stat-label">Est. Tax If Sold Today</span><span class="stat-val neu">$0.00 — at a loss</span></div>
+            <div class="stat-row"><span class="stat-label">Harvestable Loss</span><span class="stat-val pos">${fmtUsd(Math.abs(pl),2)}</span></div>
+          `;
+        }
       }
     }
 
@@ -616,7 +653,10 @@ function render(){
       </div>
       <div class="addr">${t.address}</div>
 
-      ${s.error ? `<div class="err" style="margin-top:10px;">⚠ ${s.errorMsg || "Couldn't find a live pool for this address."}</div>` : ''}
+      ${s.error ? (hasPrice
+          ? `<div class="warn">⚠ Price refresh failed — showing last known price from previous sync.</div>`
+          : `<div class="err" style="margin-top:10px;">⚠ ${s.errorMsg || "Couldn't find a live pool for this address."}</div>`)
+        : ''}
 
       <div class="price-row">
         <div class="price">${hasPrice ? fmtUsd(s.price) : '···'}</div>
