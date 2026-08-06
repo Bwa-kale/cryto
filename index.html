@@ -72,6 +72,39 @@
   .alloc-name{display:flex;align-items:center;color:var(--sub);}
   .alloc-pct{color:var(--text);font-weight:700;}
 
+  /* tax card */
+  .tax-card{
+    background:var(--panel);border:1px solid var(--panel-border);border-radius:18px;
+    backdrop-filter:blur(20px);padding:24px 28px;margin-bottom:22px;position:relative;overflow:hidden;
+  }
+  .tax-card::before{
+    content:'';position:absolute;top:0;left:0;width:100%;height:2px;
+    background:linear-gradient(90deg,var(--green),var(--gold),var(--violet));opacity:.8;
+  }
+  .tax-card-top{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px;margin-bottom:18px;}
+  .wages-field{display:flex;align-items:center;gap:10px;}
+  .tax-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px;}
+  @media(max-width:760px){.tax-grid{grid-template-columns:repeat(2,1fr);}}
+  .tax-stat{background:rgba(255,255,255,0.03);border:1px solid var(--panel-border);border-radius:10px;padding:12px 14px;}
+  .tax-stat-label{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--sub);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;}
+  .tax-stat-val{font-family:'Orbitron',sans-serif;font-size:17px;font-weight:700;}
+  .tax-total-row{
+    display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;
+    border-top:1px solid var(--panel-border);padding-top:16px;margin-top:4px;
+  }
+  .tax-total-label{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--sub);text-transform:uppercase;letter-spacing:1px;}
+  .tax-total-val{font-family:'Orbitron',sans-serif;font-size:28px;font-weight:900;color:var(--red);}
+  .tax-net-val{font-family:'Orbitron',sans-serif;font-size:20px;font-weight:700;color:var(--green);}
+  .tax-note{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--sub);margin-top:14px;line-height:1.6;}
+
+  .holding-badge{
+    display:inline-block;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:1px;
+    padding:3px 9px;border-radius:20px;text-transform:uppercase;margin-top:8px;
+  }
+  .holding-badge.lt{background:rgba(57,255,136,0.12);color:var(--green);border:1px solid rgba(57,255,136,0.3);}
+  .holding-badge.st{background:rgba(255,77,94,0.12);color:var(--red);border:1px solid rgba(255,77,94,0.3);}
+  .holding-badge.unknown{background:rgba(255,255,255,0.05);color:var(--sub);border:1px solid var(--panel-border);}
+
   /* cards grid */
   .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;}
   @media(max-width:760px){.grid{grid-template-columns:1fr;} .hero{grid-template-columns:1fr;}}
@@ -155,6 +188,20 @@
     </div>
   </div>
 
+  <div class="tax-card">
+    <div class="tax-card-top">
+      <div>
+        <div class="hero-label">Tax Impact If Sold Today</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--sub);margin-top:2px;">Single filer · NYC resident · 2026 rates</div>
+      </div>
+      <div class="wages-field">
+        <span class="field-label">W-2 Income</span>
+        <input class="field-input" id="wagesInput" type="number" min="0" step="any" value="59800">
+      </div>
+    </div>
+    <div id="taxBody"></div>
+  </div>
+
   <div class="grid" id="cardGrid"></div>
 
   <footer>PRICES VIA GECKOTERMINAL · AUTO-REFRESH 60S · DATA STORED PRIVATELY TO THIS VAULT</footer>
@@ -169,6 +216,82 @@ const TOKENS = [
 ];
 
 const FALLBACK_NETWORKS = ["pulsechain", "eth", "bsc", "base"];
+
+// ── 2026 TAX ENGINE (single filer, NYC resident) ────────────────────────
+// Sources: IRS Rev. Proc. 2025-32 (federal ordinary + LTCG brackets, std deduction),
+// NY State FY2026 budget (bottom-bracket rate cut), NYC resident tax schedule.
+// NY/NYC bracket thresholds are estimates pending final DTF publication — figures
+// here are close but treat as directional, not filing-precision.
+const FEDERAL_STD_DEDUCTION_SINGLE = 16100;
+const NY_STD_DEDUCTION_SINGLE = 8000;
+const NIIT_THRESHOLD_SINGLE = 200000;
+const NIIT_RATE = 0.038;
+
+// [incomeThreshold, marginalRate] — cumulative progressive brackets
+const FEDERAL_ORDINARY_2026 = [
+  [0, 0.10], [12400, 0.12], [50400, 0.22], [105700, 0.24],
+  [201775, 0.32], [256225, 0.35], [640600, 0.37]
+];
+const FEDERAL_LTCG_2026 = [
+  [0, 0.00], [49450, 0.15], [545500, 0.20]
+];
+const NY_STATE_2026 = [
+  [0, 0.039], [8500, 0.044], [11700, 0.0515], [13900, 0.054],
+  [80650, 0.059], [215400, 0.0685], [1077550, 0.0965],
+  [5000000, 0.103], [25000000, 0.109]
+];
+const NYC_RESIDENT_2026 = [
+  [0, 0.03078], [12000, 0.03762], [25000, 0.03819], [50000, 0.03876]
+];
+
+function bracketTax(income, brackets){
+  if(income <= 0) return 0;
+  let tax = 0;
+  for(let i=0;i<brackets.length;i++){
+    const [threshold, rate] = brackets[i];
+    const next = (i+1 < brackets.length) ? brackets[i+1][0] : Infinity;
+    if(income > threshold){
+      tax += (Math.min(income, next) - threshold) * rate;
+    } else break;
+  }
+  return tax;
+}
+
+// Computes tax owed on realizing stGain (ordinary) + ltGain (preferential) on top of wages.
+function computeTaxImpact(wages, stGain, ltGain){
+  stGain = Math.max(0, stGain);
+  ltGain = Math.max(0, ltGain);
+
+  // Federal: ST stacks as ordinary income, LT stacks on top for bracket purposes
+  const fedBase = Math.max(0, wages - FEDERAL_STD_DEDUCTION_SINGLE);
+  const fedWithST = Math.max(0, wages + stGain - FEDERAL_STD_DEDUCTION_SINGLE);
+  const fedTaxOnST = bracketTax(fedWithST, FEDERAL_ORDINARY_2026) - bracketTax(fedBase, FEDERAL_ORDINARY_2026);
+  const fedTaxOnLT = bracketTax(fedWithST + ltGain, FEDERAL_LTCG_2026) - bracketTax(fedWithST, FEDERAL_LTCG_2026);
+  const federalTotal = fedTaxOnST + fedTaxOnLT;
+
+  // NIIT — 3.8% surtax on lesser of net investment income or MAGI over threshold
+  const magi = wages + stGain + ltGain;
+  const nii = stGain + ltGain;
+  const niit = magi > NIIT_THRESHOLD_SINGLE ? NIIT_RATE * Math.min(nii, magi - NIIT_THRESHOLD_SINGLE) : 0;
+
+  // NY State & NYC — no preferential rate; ST+LT both taxed as ordinary income
+  const nyBase = Math.max(0, wages - NY_STD_DEDUCTION_SINGLE);
+  const nyWithGains = Math.max(0, wages + stGain + ltGain - NY_STD_DEDUCTION_SINGLE);
+  const nyTax = bracketTax(nyWithGains, NY_STATE_2026) - bracketTax(nyBase, NY_STATE_2026);
+  const nycTax = bracketTax(nyWithGains, NYC_RESIDENT_2026) - bracketTax(nyBase, NYC_RESIDENT_2026);
+
+  const totalTax = federalTotal + niit + nyTax + nycTax;
+  return { fedTaxOnST, fedTaxOnLT, federalTotal, niit, nyTax, nycTax, totalTax };
+}
+
+function daysHeld(purchaseDateStr){
+  if(!purchaseDateStr) return null;
+  const purchase = new Date(purchaseDateStr + "T00:00:00");
+  if(isNaN(purchase.getTime())) return null;
+  const diffMs = Date.now() - purchase.getTime();
+  return Math.floor(diffMs / 86400000);
+}
+
 
 const COLORS = ["#d4af37", "#8b6cff", "#39ff88", "#ff8a5c"];
 
@@ -186,6 +309,8 @@ function fmtNum(n, decimals=2){
   return n.toLocaleString(undefined,{minimumFractionDigits:decimals,maximumFractionDigits:decimals});
 }
 
+let taxSettings = { wages: 59800 };
+
 function loadPersisted(){
   for(const t of TOKENS){
     const key = "vault-crypto:" + t.address.toLowerCase();
@@ -193,21 +318,31 @@ function loadPersisted(){
       const raw = localStorage.getItem(key);
       if(raw){
         const parsed = JSON.parse(raw);
-        state[t.address] = { ...state[t.address], shares: parsed.shares ?? 0, cost: parsed.cost ?? 0 };
+        state[t.address] = { ...state[t.address], shares: parsed.shares ?? 0, cost: parsed.cost ?? 0, purchaseDate: parsed.purchaseDate ?? "" };
       } else {
-        state[t.address] = { ...state[t.address], shares: 0, cost: 0 };
+        state[t.address] = { ...state[t.address], shares: 0, cost: 0, purchaseDate: "" };
       }
     }catch(e){
-      state[t.address] = { ...state[t.address], shares: 0, cost: 0 };
+      state[t.address] = { ...state[t.address], shares: 0, cost: 0, purchaseDate: "" };
     }
   }
+  try{
+    const raw = localStorage.getItem("vault-tax-settings");
+    if(raw) taxSettings = { ...taxSettings, ...JSON.parse(raw) };
+  }catch(e){}
 }
 
 function persist(address){
   const key = "vault-crypto:" + address.toLowerCase();
   const s = state[address];
   try{
-    localStorage.setItem(key, JSON.stringify({ shares: s.shares, cost: s.cost }));
+    localStorage.setItem(key, JSON.stringify({ shares: s.shares, cost: s.cost, purchaseDate: s.purchaseDate }));
+  }catch(e){ console.error("storage save failed", e); }
+}
+
+function persistTaxSettings(){
+  try{
+    localStorage.setItem("vault-tax-settings", JSON.stringify(taxSettings));
   }catch(e){ console.error("storage save failed", e); }
 }
 
@@ -293,8 +428,12 @@ async function refreshAll(){
 }
 
 function updateField(address, field, value){
-  const num = parseFloat(value);
-  state[address][field] = isNaN(num) ? 0 : num;
+  if(field === 'purchaseDate'){
+    state[address][field] = value;
+  } else {
+    const num = parseFloat(value);
+    state[address][field] = isNaN(num) ? 0 : num;
+  }
   persist(address);
   // don't call render() here — the input the user is actively typing in
   // would get destroyed and rebuilt mid-keystroke. Totals/ratios/allocation
@@ -304,6 +443,17 @@ function updateField(address, field, value){
 function onFieldBlur(address, field, value){
   updateField(address, field, value);
   render(); // now safe to rebuild — the field is no longer focused
+}
+
+function updateWages(value){
+  const num = parseFloat(value);
+  taxSettings.wages = isNaN(num) ? 0 : num;
+  persistTaxSettings();
+}
+
+function onWagesBlur(value){
+  updateWages(value);
+  render();
 }
 
 function render(){
@@ -341,6 +491,62 @@ function render(){
     plEl.innerHTML = `<span class="${pl>=0?'pos':'neg'}">${pl>=0?'▲':'▼'} ${fmtUsd(Math.abs(pl),2)} (${plPct>=0?'+':''}${fmtNum(plPct,2)}%)</span> <span class="neu">unrealized</span>`;
   } else {
     plEl.innerHTML = `<span class="neu">add cost basis to track P&L</span>`;
+  }
+
+  // ── aggregate ST/LT gains across all assets for the combined tax card ──
+  let totalSTGain = 0, totalLTGain = 0, anyGainData = false;
+  TOKENS.forEach(t => {
+    const s = state[t.address];
+    if(!s || !s.price || !s.shares || !s.cost) return;
+    const gain = (s.price - s.cost) * s.shares;
+    if(gain <= 0) return; // only taxable gains matter for this estimate
+    const held = daysHeld(s.purchaseDate);
+    if(held === null) return; // no purchase date entered — can't classify
+    anyGainData = true;
+    if(held > 365) totalLTGain += gain; else totalSTGain += gain;
+  });
+
+  const taxBody = document.getElementById('taxBody');
+  if(!anyGainData){
+    taxBody.innerHTML = `<div class="loading">Add a purchase date and cost basis to each holding to estimate what you'd owe on a sale.</div>`;
+  } else {
+    const impact = computeTaxImpact(taxSettings.wages, totalSTGain, totalLTGain);
+    const totalGain = totalSTGain + totalLTGain;
+    const netAfterTax = totalGain - impact.totalTax;
+    const effRate = totalGain > 0 ? (impact.totalTax/totalGain)*100 : 0;
+
+    taxBody.innerHTML = `
+      <div class="tax-grid">
+        <div class="tax-stat">
+          <div class="tax-stat-label">Short-Term Gain</div>
+          <div class="tax-stat-val">${fmtUsd(totalSTGain,2)}</div>
+        </div>
+        <div class="tax-stat">
+          <div class="tax-stat-label">Long-Term Gain</div>
+          <div class="tax-stat-val">${fmtUsd(totalLTGain,2)}</div>
+        </div>
+        <div class="tax-stat">
+          <div class="tax-stat-label">Federal (ordinary + LTCG)</div>
+          <div class="tax-stat-val">${fmtUsd(impact.federalTotal,2)}</div>
+        </div>
+        <div class="tax-stat">
+          <div class="tax-stat-label">NY State + NYC</div>
+          <div class="tax-stat-val">${fmtUsd(impact.nyTax + impact.nycTax,2)}</div>
+        </div>
+      </div>
+      ${impact.niit > 0 ? `<div class="tax-stat" style="margin-bottom:16px;"><div class="tax-stat-label">NIIT Surtax (3.8%, MAGI over $200K)</div><div class="tax-stat-val">${fmtUsd(impact.niit,2)}</div></div>` : ''}
+      <div class="tax-total-row">
+        <div>
+          <div class="tax-total-label">Estimated Total Tax Owed</div>
+          <div class="tax-total-val">${fmtUsd(impact.totalTax,2)}</div>
+        </div>
+        <div style="text-align:right;">
+          <div class="tax-total-label">Net After Tax (${fmtNum(effRate,1)}% effective)</div>
+          <div class="tax-net-val">${fmtUsd(netAfterTax,2)}</div>
+        </div>
+      </div>
+      <div class="tax-note">Stacks on top of your $${taxSettings.wages.toLocaleString()} W-2 income · single filer, NYC resident, 2026 brackets · long-term = held over 365 days · NY/NYC tax gains as ordinary income (no preferential rate) · estimate only, not tax advice — confirm with a CPA before filing.</div>
+    `;
   }
 
   // allocation bar + legend
@@ -384,6 +590,22 @@ function render(){
     const offset = circumference - (pct/100)*circumference;
     const chg = s.chg24;
 
+    const held = daysHeld(s.purchaseDate);
+    let badgeHtml = `<span class="holding-badge unknown">Add purchase date</span>`;
+    let cardTaxHtml = '';
+    if(held !== null){
+      const isLT = held > 365;
+      badgeHtml = `<span class="holding-badge ${isLT?'lt':'st'}">${isLT?'Long-Term':'Short-Term'} · ${held}d held</span>`;
+      if(hasPrice && s.shares && s.cost && pl > 0){
+        const single = computeTaxImpact(taxSettings.wages, isLT?0:pl, isLT?pl:0);
+        const net = pl - single.totalTax;
+        cardTaxHtml = `
+          <div class="stat-row"><span class="stat-label">Est. Tax If Sold Today</span><span class="stat-val neg">${fmtUsd(single.totalTax,2)}</span></div>
+          <div class="stat-row"><span class="stat-label">Net After Tax</span><span class="stat-val pos">${fmtUsd(net,2)}</span></div>
+        `;
+      }
+    }
+
     card.innerHTML = `
       <div class="card-top">
         <div>
@@ -400,6 +622,7 @@ function render(){
         <div class="price">${hasPrice ? fmtUsd(s.price) : '···'}</div>
         ${chg !== null && chg !== undefined ? `<div class="chg ${chg>=0?'pos':'neg'}">${chg>=0?'+':''}${fmtNum(chg,2)}% 24h</div>` : ''}
       </div>
+      ${badgeHtml}
 
       <div class="divider"></div>
 
@@ -410,6 +633,10 @@ function render(){
       <div class="field-row">
         <span class="field-label">Avg Cost / Share</span>
         <input class="field-input" type="number" min="0" step="any" value="${s.cost || 0}" data-address="${t.address}" data-field="cost">
+      </div>
+      <div class="field-row">
+        <span class="field-label">Purchase Date</span>
+        <input class="field-input" type="date" value="${s.purchaseDate || ''}" data-address="${t.address}" data-field="purchaseDate" style="width:140px;">
       </div>
 
       <div class="divider"></div>
@@ -422,6 +649,7 @@ function render(){
           ${(!hasPrice || plPct===null) ? '—' : `${pl>=0?'+':''}${fmtUsd(pl,2)} (${plPct>=0?'+':''}${fmtNum(plPct,2)}%)`}
         </span>
       </div>
+      ${cardTaxHtml}
 
       <div class="ratio-wrap">
         <div class="ratio-ring">
@@ -465,6 +693,10 @@ function render(){
 
 async function init(){
   await loadPersisted();
+  const wagesInput = document.getElementById('wagesInput');
+  wagesInput.value = taxSettings.wages;
+  wagesInput.addEventListener('input', (e) => updateWages(e.target.value));
+  wagesInput.addEventListener('blur', (e) => onWagesBlur(e.target.value));
   render();
   await refreshAll();
   setInterval(refreshAll, 60000);
